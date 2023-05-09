@@ -65,6 +65,46 @@
               }
             });
           },
+          _Select: function (item) {
+            AutoComplete.defaults._Select.call(this, item);
+            var form = item.closest('form');
+            if (form) {
+              form.submit();
+            }
+          },
+          _MinChars: function () {
+            if (this.Input.value.indexOf('!') > -1) {
+              return 0;
+            } else {
+              return AutoComplete.defaults._MinChars.call(this);
+            }
+          },
+          KeyboardMappings: Object.assign({}, AutoComplete.defaults.KeyboardMappings, {
+            "KeyUpAndDown_up": Object.assign({}, AutoComplete.defaults.KeyboardMappings.KeyUpAndDown_up, {
+              Callback: function (event) {
+                AutoComplete.defaults.KeyboardMappings.KeyUpAndDown_up.Callback.call(this, event);
+                var liActive = this.DOMResults.querySelector("li.active");
+                if (liActive) {
+                  AutoComplete.defaults._Select.call(this, liActive);
+                }
+              },
+            }),
+            "Tab": Object.assign({}, AutoComplete.defaults.KeyboardMappings.Enter, {
+              Conditions: [{
+                Is: 9,
+                Not: false
+              }],
+              Callback: function (event) {
+                if (this.DOMResults.getAttribute("class").indexOf("open") != -1) {
+                  var liActive = this.DOMResults.querySelector("li.active");
+                  if (liActive !== null) {
+                    AutoComplete.defaults._Select.call(this, liActive);
+                    event.preventDefault();
+                  }
+                }
+              },
+            })
+          }),
         }, "#" + qinput_id);
       }
 

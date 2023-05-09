@@ -84,6 +84,7 @@ from searx.webutils import (
 from searx.webadapter import (
     get_search_query_from_webapp,
     get_selected_categories,
+    parse_lang,
 )
 from searx.utils import (
     html_to_text,
@@ -96,6 +97,7 @@ from searx.plugins import Plugin, plugins, initialize as plugin_initialize
 from searx.plugins.oa_doi_rewrite import get_doi_resolver
 from searx.preferences import (
     Preferences,
+    ClientPref,
     ValidationException,
 )
 from searx.answerers import (
@@ -221,16 +223,9 @@ babel = Babel(app, locale_selector=get_locale)
 
 
 def _get_browser_language(req, lang_list):
-    for lang in req.headers.get("Accept-Language", "en").split(","):
-        if ';' in lang:
-            lang = lang.split(';')[0]
-        if '-' in lang:
-            lang_parts = lang.split('-')
-            lang = "{}-{}".format(lang_parts[0], lang_parts[-1].upper())
-        locale = match_locale(lang, lang_list, fallback=None)
-        if locale is not None:
-            return locale
-    return 'en'
+    client = ClientPref.from_http_request(req)
+    locale = match_locale(client.locale_tag, lang_list, fallback='en')
+    return locale
 
 
 def _get_locale_rfc5646(locale):
@@ -373,16 +368,15 @@ def get_translations():
     }
 
 
-def _get_enable_categories(all_categories: Iterable[str]):
-    disabled_engines = request.preferences.engines.get_disabled()
-    enabled_categories = set(
-        # pylint: disable=consider-using-dict-items
-        category
-        for engine_name in engines
-        for category in engines[engine_name].categories
-        if (engine_name, category) not in disabled_engines
-    )
-    return [x for x in all_categories if x in enabled_categories]
+def get_enabled_categories(category_names: Iterable[str]):
+    """The categories in ``category_names```for which there is no active engine
+    are filtered out and a reduced list is returned."""
+
+    enabled_engines = [item[0] for item in request.preferences.engines.get_enabled()]
+    enabled_categories = set()
+    for engine_name in enabled_engines:
+        enabled_categories.update(engines[engine_name].categories)
+    return [x for x in category_names if x in enabled_categories]
 
 
 def get_pretty_url(parsed_url: urllib.parse.ParseResult):
@@ -434,7 +428,7 @@ def render(template_name: str, **kwargs):
     kwargs['theme'] = request.preferences.get_value('theme')
     kwargs['method'] = request.preferences.get_value('method')
     kwargs['categories_as_tabs'] = list(settings['categories_as_tabs'].keys())
-    kwargs['categories'] = _get_enable_categories(categories.keys())
+    kwargs['categories'] = get_enabled_categories(settings['categories_as_tabs'].keys())
     kwargs['DEFAULT_CATEGORY'] = DEFAULT_CATEGORY
 
     # i18n
@@ -447,11 +441,7 @@ def render(template_name: str, **kwargs):
         kwargs['rtl'] = True
 
     if 'current_language' not in kwargs:
-        _locale = request.preferences.get_value('language')
-        if _locale in ('auto', 'all'):
-            kwargs['current_language'] = _locale
-        else:
-            kwargs['current_language'] = match_locale(_locale, settings['search']['languages'])
+        kwargs['current_language'] = parse_lang(request.preferences, {}, RawTextQuery('', []))
 
     # values from settings
     kwargs['search_formats'] = [x for x in settings['search']['formats'] if x != 'html']
@@ -513,7 +503,10 @@ def pre_request():
     request.timings = []  # pylint: disable=assigning-non-slot
     request.errors = []  # pylint: disable=assigning-non-slot
 
-    preferences = Preferences(themes, list(categories.keys()), engines, plugins)  # pylint: disable=redefined-outer-name
+    client_pref = ClientPref.from_http_request(request)
+    # pylint: disable=redefined-outer-name
+    preferences = Preferences(themes, list(categories.keys()), engines, plugins, client_pref)
+
     user_agent = request.headers.get('User-Agent', '').lower()
     if 'webkit' in user_agent and 'android' in user_agent:
         preferences.key_value_settings['method'].value = 'GET'
@@ -682,7 +675,9 @@ def search():
     raw_text_query = None
     result_container = None
     try:
-        search_query, raw_text_query, _, _ = get_search_query_from_webapp(request.preferences, request.form)
+        search_query, raw_text_query, _, _, selected_locale = get_search_query_from_webapp(
+            request.preferences, request.form
+        )
         # search = Search(search_query) #  without plugins
         search = SearchWithPlugins(search_query, request.user_plugins, request)  # pylint: disable=redefined-outer-name
 
@@ -813,13 +808,6 @@ def search():
         )
     )
 
-    if search_query.lang in ('auto', 'all'):
-        current_language = search_query.lang
-    else:
-        current_language = match_locale(
-            search_query.lang, settings['search']['languages'], fallback=request.preferences.get_value("language")
-        )
-
     # search_query.lang contains the user choice (all, auto, en, ...)
     # when the user choice is "auto", search.search_query.lang contains the detected language
     # otherwise it is equals to search_query.lang
@@ -842,7 +830,7 @@ def search():
             result_container.unresponsive_engines
         ),
         current_locale = request.preferences.get_value("locale"),
-        current_language = current_language,
+        current_language = selected_locale,
         search_language = match_locale(
             search.search_query.lang,
             settings['search']['languages'],
